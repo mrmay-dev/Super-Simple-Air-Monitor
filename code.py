@@ -5,12 +5,12 @@ import os
 # User Settings
 # ------------------------------------------------------------------
 
-plant_name = 'aqi_09be8f'
 wait_timeout = 30
 reading_interval = 1             # seconds
 write_interval = 30 * 60         # minutes * seconds
            
 # ThingSpeak Broker
+# Store secrets in a `settings.toml` file.
 THINGSPEAK_SERVER = os.getenv("THINGSPEAK_SERVER")
 THINGSPEAK_CLIENT_ID = os.getenv("THINGSPEAK_CLIENT_ID")
 THINGSPEAK_USER_NAME = THINGSPEAK_CLIENT_ID
@@ -23,7 +23,7 @@ THINGSPEAK_WRITE_API_KEY = os.getenv("THINGSPEAK_WRITE_API_KEY")
 # Import Libraries
 # ------------------------------------------------------------------
 
-# built-in modules
+# General Modules
 import time as time
 import board
 import busio
@@ -36,9 +36,12 @@ from adafruit_bme280 import basic as adafruit_bme280
 import adafruit_sgp40
 
 # Display Modules
+# Works with inexpensive SSD1306 I2C oleds available on AliExpress and Amazon
 import terminalio
 import displayio
-from adafruit_display_text import bitmap_label
+from adafruit_display_text import bitmap_label as label
+from adafruit_bitmap_font import bitmap_font
+from adafruit_display_shapes.rect import Rect
 import adafruit_displayio_ssd1306
 
 # Network Modules
@@ -79,7 +82,7 @@ display = adafruit_displayio_ssd1306.SSD1306(
 )
 display.show(None)
 
-print(f'Screen loaded.\n\n{dir(board)}\n')
+print(f'Screen loaded.\n\n{dir(board)}\n')  # Print out board pins for reference.
 
 
 # NTP Time
@@ -89,30 +92,20 @@ r = rtc.RTC()
 days = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 months = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
 
-print(f'rtc loaded\n{time.time()}\n')
+print(f'rtc loaded\n{time.time()}\n')  # Prints time stored in the RTC.
 
 def set_clock_now():
-  print('Getting time from NTP.')
-  ref_time = 4200000000
-  now_time = time.time()
-  
-  print()
+  print('Getting time from NTP.\n')
+  r.datetime = ntp.datetime
 
-  while now_time < ref_time:
-
-    r.datetime = ntp.datetime
-    # pi_rtc.datetime = ntp.datetime
-
-    # print(f' NTP: {ntp.datetime}')
-    # print(f' RTC: {r.datetime}')
-    # print(f'Time: {time.localtime()}')
-    ref_time = time.time()
-    print()
-    
-    time.sleep(2)
-    now_time = time.time()
+  time.sleep(2)
     
   print('New time set!')
+
+  # print(f' NTP: {ntp.datetime}')
+  # print(f' RTC: {r.datetime}')
+  # print(f'Time: {time.localtime()}')
+  print()
 
 
 # MQTT Setup
@@ -142,17 +135,22 @@ io.on_message = new_message
 # -------------------------------------------------------
 
 set_clock_now()
-print_it = True
+print_stats = True
 
 t = time.localtime()
-print(f'It is: {days[t.tm_wday + 1]}, {months[t.tm_mon-1]} {t.tm_mday} at {t.tm_hour:02}:{t.tm_min:02}:{t.tm_sec:02}\n')
+# tm_wday = 0-6, 0 is Monday
+# tm_mon = 1-12, 1 is January
+print(f'It is: {days[t.tm_wday + 0]}, {months[t.tm_mon - 1]} {t.tm_mday} at {t.tm_hour:02}:{t.tm_min:02}:{t.tm_sec:02}\n')
 
+# To prevent the OLED from burning out text is only displayed for the
+# difference between limit_max and limit_low.
+# (ie limit_max - limit_low = time stats are displayed so, 6 - 4 = 2 sec display time.)
 limit_max = 6  # Number of times times to loop through data collection.
-limit_low = 4  # Below this number will not print.
-limit = limit_max - 0
+limit_low = 2  # Below this number will not print.
+limit = limit_max
 
+# Set the time when data will be pushed to MQTT next.
 next_interval = time.monotonic() + write_interval  # Time to wait for tramsmitting data.
-
 
 # Main Loop
 while True:
@@ -166,22 +164,24 @@ while True:
     compensated_raw_gas = sgp.measure_raw(temperature=temperature, relative_humidity=humidity)
     voc_index = sgp.measure_index(temperature=temperature, relative_humidity=humidity)
     
-    date_block = f'{days[t.tm_wday]} {months[t.tm_mon-1]} {t.tm_mday}'
+    # Prepare text blocks
+    date_block = f'{days[t.tm_wday]}, {months[t.tm_mon-1]} {t.tm_mday}'
     time_block = f'{t.tm_hour:02}:{t.tm_min:02}'  # :{t.tm_sec:02}'
-    clock_block = f'{date_block:>9} | {time_block:<5}' # ({limit:02d})'
+    clock_block = f'{date_block:>9} at {time_block:<5} PST' # ({limit:02d})'
     data_block = f'R: {compensated_raw_gas} | I: {voc_index}'
 
 
-    # Display data
+    # Display text routine 
     if limit < limit_low:
-        print_it = False
-    if print_it:
-        print(f'{clock_block:^20} {data_block:^21}    {str(ip_address)} {limit:02d}')
-    if not print_it:
-        print(f'         ')  #{limit:02d}')
+        print_stats = False
+    if print_stats:
+        print(f'\n{voc_index:^20}\n')
+        # print(f'{clock_block:^20} {data_block:^21}    {str(ip_address)} {limit:02d}')
+    if not print_stats:
+        print('\n')  #{limit:02d}')
     if limit <= 0:
         limit = limit_max + 1
-        print_it = True
+        print_stats = True
 
 
     # MQTT Activity
@@ -210,7 +210,7 @@ while True:
         voc_index = voc_index
 
         thinkspeak_topic = "channels/" + THINGSPEAK_CHANNEL_ID + "/publish"
-        thingspeak_payload = f'field1={temperature_f}&field2={humidity}&field3={compensated_raw_gas}&field4={voc_index}&status=MQTTPUBLISH'
+        thingspeak_payload = f'field1={temperature_f}&field2={humidity}&field3={compensated_raw_gas}&field4={voc_index}&status={clock_block}'
 
         print(f'\n{thinkspeak_topic}\n{thingspeak_payload}\n')
         io.publish(thinkspeak_topic, thingspeak_payload, False)
@@ -222,3 +222,4 @@ while True:
     
     limit += -1
     time.sleep(1)
+
